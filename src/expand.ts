@@ -1,3 +1,4 @@
+import { GeneralError } from './error_exit_code';
 import type { Token } from './tokenize';
 
 /**
@@ -108,7 +109,12 @@ function _expand(
     if (substitutions?.[substitutionIndex]?.[0] === index) {
       // Replace the whole substitution with its output. As for an unquoted '$NAME', the characters
       // are candidates for word splitting unless the substitution is inside double quotes.
-      const replacement: string = substitutionValues?.[substitutionIndex] ?? '';
+      const replacement: string | undefined = substitutionValues?.[substitutionIndex];
+      if (replacement === undefined) {
+        // The shell runs each command substitution and stores its output on the token before the
+        // token is expanded, so a missing value is a programming error rather than user input.
+        throw new GeneralError('Command substitution has no value');
+      }
       const splittable: boolean =
         !heredoc && !isInSection(index, quoted) && !isInSection(index, singleQuoted);
       text += replacement;

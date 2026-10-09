@@ -245,6 +245,33 @@ test.describe('Shell', () => {
       expect(output[11]).toMatch('\r\nhi\r\n');
     });
 
+    test('should take the exit code of an assignment from its last substitution', async ({
+      page
+    }) => {
+      const output = await shellLineSimpleN(page, [
+        'x=$(false)',
+        'echo $?',
+        'x=$(false) y=$(true)',
+        'echo $?',
+        'echo $(false)',
+        'echo $?',
+        'x=$(nonexistent)',
+        'echo $?'
+      ]);
+      expect(output[1]).toMatch('\r\n1\r\n');
+      expect(output[3]).toMatch('\r\n0\r\n');
+      // With a command word present the exit code is the command's, not the substitution's.
+      expect(output[5]).toMatch('\r\n0\r\n');
+      // A failing command in the substitution reports its error and its exit code.
+      expect(output[6]).toMatch(/command not found/);
+      expect(output[7]).toMatch('\r\n127\r\n');
+    });
+
+    test('should give a command substitution the input of the command', async ({ page }) => {
+      const output = await shellLineSimpleN(page, ['cat file2 | echo "$(cat)"']);
+      expect(output[0]).toMatch('\r\nSome other file\r\nSecond line\r\n');
+    });
+
     test('should set IShell.exitCode', async ({ page }) => {
       const exitCodes = await page.evaluate(async cmdName => {
         const { shell } = await globalThis.cockle.shellSetupSimple();

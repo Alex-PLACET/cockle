@@ -828,32 +828,43 @@ export class ShellImpl implements IShellImpl {
 
   /**
    * Run a command substitution and return its standard output with trailing newlines removed, as
-   * bash does. The command runs in this shell's environment and its standard error goes to the
-   * shell's standard error.
+   * bash does. The command inherits the given input and this shell's environment, and its standard
+   * error goes to the shell's standard error.
    * @param command The text of the command to run.
-   * @returns The standard output of the command.
+   * @param stdin The input stream inherited by the command.
+   * @returns The standard output of the command, and its exit code.
    */
-  private async _commandSubstitution(command: string): Promise<string> {
+  private async _commandSubstitution(
+    command: string,
+    stdin: IInput
+  ): Promise<{ output: string; exitCode: number }> {
     const output = new Pipe();
+    let exitCode: number | undefined;
     try {
       const nodes = parse(command, true, this.aliases);
-      await this._runNodes(nodes, this._dummyInput, output, this._stderr);
+      exitCode = await this._runNodes(nodes, stdin, output, this._stderr);
     } catch (error: unknown) {
-      // A command that exits is not an error: as in bash, the substitution just ends there.
-      if (!(error instanceof ErrorExitCode)) {
-        this._stderr.write(`${error}\n`);
-        this._stderr.flush();
+      if (error instanceof ErrorExitCode) {
+        exitCode = error.exitCode;
       }
+      this._stderr.write(`${error}\n`);
+      this._stderr.flush();
     }
-    return output.allContent.replace(/\n+$/, '');
+    return {
+      output: output.allContent.replace(/\n+$/, ''),
+      exitCode: exitCode ?? ExitCode.SUCCESS
+    };
   }
 
   /**
    * Run the command substitutions of the given tokens, storing their output on each token so that
    * it is used when the token is expanded.
    * @param tokens The tokens whose command substitutions should be run.
+   * @param stdin The input stream inherited by each command.
+   * @returns The exit code of the last command substitution run, or undefined if there are none.
    */
-  private async _resolveSubstitutions(tokens: Token[]): Promise<void> {
+  private async _resolveSubstitutions(tokens: Token[], stdin: IInput): Promise<number | undefined> {
+    let exitCode: number | undefined;
     for (const token of tokens) {
       if (token.substitutions === undefined) {
         continue;
@@ -861,10 +872,16 @@ export class ShellImpl implements IShellImpl {
       const values: string[] = [];
       for (const [start, end] of token.substitutions) {
         const open: number = token.value[start] === '`' ? 1 : 2;
-        values.push(await this._commandSubstitution(token.value.slice(start + open, end - 1)));
+        const result = await this._commandSubstitution(
+          token.value.slice(start + open, end - 1),
+          stdin
+        );
+        values.push(result.output);
+        exitCode = result.exitCode;
       }
       token.substitutionValues = values;
     }
+    return exitCode;
   }
 
   private async _runCommand(
@@ -877,17 +894,27 @@ export class ShellImpl implements IShellImpl {
     const head = commandNode.name;
     const tokens = head !== undefined ? [head, ...commandNode.suffix] : [];
     const redirects = commandNode.redirects ?? [];
-    await this._resolveSubstitutions([
-      ...tokens,
-      ...redirects.flatMap(redirect => [redirect.token, redirect.target])
-    ]);
+    // A command substitution inherits the input of the command, before its own redirections.
+    const substitutionExitCode = await this._resolveSubstitutions(
+      [...tokens, ...redirects.flatMap(redirect => [redirect.token, redirect.target])],
+      input
+    );
 
     // Leading 'NAME=value' tokens before the command word are assignments. A command which is only
     // assignments defines them in the shell; otherwise they apply to that command alone.
     const k = this._assignmentCount(tokens);
 
     if (k === tokens.length && k > 0) {
-      return this._runAssignmentsOnly(commandNode, tokens, k, input, output, error, inPipeline);
+      return this._runAssignmentsOnly(
+        commandNode,
+        tokens,
+        k,
+        input,
+        output,
+        error,
+        inPipeline,
+        substitutionExitCode
+      );
     }
 
     // Redirections are applied before the command is looked up: bash reports an ambiguous redirect
@@ -964,6 +991,8 @@ export class ShellImpl implements IShellImpl {
    * @param output The output stream for the command.
    * @param error The error stream for the command.
    * @param inPipeline Whether the command is part of a pipeline.
+   * @param substitutionExitCode The exit code of the last command substitution in the command, if
+   * any. As in bash, an assignment-only command takes its exit code from its last substitution.
    * @returns The exit code of the assignment execution.
    */
   private _runAssignmentsOnly(
@@ -973,7 +1002,8 @@ export class ShellImpl implements IShellImpl {
     input: IInput,
     output: IOutput,
     error: IOutput,
-    inPipeline: boolean
+    inPipeline: boolean,
+    substitutionExitCode?: number
   ): number {
     // bash runs a pipeline element in a subshell, so 'A=1 | cat' discards the assignment.
     const environment = inPipeline ? new Environment(this.environment) : this.environment;
@@ -990,7 +1020,7 @@ export class ShellImpl implements IShellImpl {
       environment
     ));
     this._flushOutputs(output, error);
-    return ExitCode.SUCCESS;
+    return substitutionExitCode ?? ExitCode.SUCCESS;
   }
 
   /**

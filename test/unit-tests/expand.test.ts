@@ -238,4 +238,11 @@ describe('command substitution', () => {
   test('should ignore a substitution within single quotes', () => {
     expect(expandToken(tokenize("'$(pwd)'")[0], environment)).toEqual('$(pwd)');
   });
+
+  test('should throw when a substitution has no value', () => {
+    // The shell always runs the substitution before expansion, so this cannot happen in practice.
+    expect(() => expandToken(tokenize('$(pwd)')[0], environment)).toThrow(
+      'Command substitution has no value'
+    );
+  });
 });
