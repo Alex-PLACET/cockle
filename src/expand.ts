@@ -76,6 +76,8 @@ export type Expansion = { text: string; expandable: boolean[] };
  * @param singleQuoted An array of single-quoted sections in the string.
  * @param heredoc Whether the value is the body of a here document. Its backslashes quote only '$',
  * '`', '\\' and newline, and its text is never split into fields.
+ * @param substitutions The command substitution spans of the value, if any.
+ * @param substitutionValues The output of each command substitution, in the same order.
  * @returns The expanded text and a mask of the characters which came from an unquoted reference.
  */
 function _expand(
@@ -83,9 +85,15 @@ function _expand(
   environment: ReadonlyMap<string, string>,
   quoted?: [number, number][],
   singleQuoted?: [number, number][],
-  heredoc: boolean = false
+  heredoc: boolean = false,
+  substitutions?: [number, number][],
+  substitutionValues?: string[]
 ): Expansion {
-  if (value.indexOf('$') < 0 && value.indexOf('\\') < 0) {
+  if (
+    (substitutions === undefined || substitutions.length === 0) &&
+    value.indexOf('$') < 0 &&
+    value.indexOf('\\') < 0
+  ) {
     return { text: value, expandable: new Array<boolean>(value.length).fill(false) };
   }
 
@@ -95,7 +103,22 @@ function _expand(
   let text: string = '';
   const expandable: boolean[] = [];
   let index: number = 0;
+  let substitutionIndex: number = 0;
   while (index < value.length) {
+    if (substitutions?.[substitutionIndex]?.[0] === index) {
+      // Replace the whole substitution with its output. As for an unquoted '$NAME', the characters
+      // are candidates for word splitting unless the substitution is inside double quotes.
+      const replacement: string = substitutionValues?.[substitutionIndex] ?? '';
+      const splittable: boolean =
+        !heredoc && !isInSection(index, quoted) && !isInSection(index, singleQuoted);
+      text += replacement;
+      for (let i = 0; i < replacement.length; i++) {
+        expandable.push(splittable);
+      }
+      index = substitutions[substitutionIndex][1];
+      substitutionIndex++;
+      continue;
+    }
     const char: string = value[index];
     const next: string | undefined = value[index + 1];
     const singleQuotedAtIndex: boolean = isInSection(index, singleQuoted);
@@ -168,7 +191,15 @@ export function expandString(value: string, environment: ReadonlyMap<string, str
  * @returns The string with environment variable references expanded.
  */
 export function expandToken(token: Token, environment: ReadonlyMap<string, string>): string {
-  return _expand(token.value, environment, token.quoted, token.singleQuoted).text;
+  return _expand(
+    token.value,
+    environment,
+    token.quoted,
+    token.singleQuoted,
+    false,
+    token.substitutions,
+    token.substitutionValues
+  ).text;
 }
 
 /**
@@ -180,14 +211,26 @@ export function expandToken(token: Token, environment: ReadonlyMap<string, strin
  * @returns The fields of the expanded token, which is empty if the token expands to nothing.
  */
 export function splitToken(token: Token, environment: ReadonlyMap<string, string>): string[] {
-  if (token.value.indexOf('$') < 0 && token.value.indexOf('\\') < 0) {
+  if (
+    (token.substitutions === undefined || token.substitutions.length === 0) &&
+    token.value.indexOf('$') < 0 &&
+    token.value.indexOf('\\') < 0
+  ) {
     if (token.value === '') {
       return token.quoted?.length ? [''] : [];
     }
     return [token.value];
   }
 
-  const { text, expandable } = _expand(token.value, environment, token.quoted, token.singleQuoted);
+  const { text, expandable } = _expand(
+    token.value,
+    environment,
+    token.quoted,
+    token.singleQuoted,
+    false,
+    token.substitutions,
+    token.substitutionValues
+  );
   if (text === '') {
     // bash: 'E=; $E' gives no fields, '"$E"' gives one empty field.
     return token.quoted?.length ? [''] : [];

@@ -204,3 +204,38 @@ describe('splitToken', () => {
     expect(split('plain')).toEqual(['plain']);
   });
 });
+
+describe('command substitution', () => {
+  const environment = getEnvironment();
+
+  // Tokenize the source and attach the outputs the shell would supply for its substitutions.
+  const token = (source: string, ...values: string[]) => {
+    const result = tokenize(source)[0];
+    result.substitutionValues = values;
+    return result;
+  };
+
+  test('should expand a substitution to its output', () => {
+    expect(expandToken(token('$(pwd)', '/drive/dirA'), environment)).toEqual('/drive/dirA');
+    expect(expandToken(token('a$(pwd)b', 'X'), environment)).toEqual('aXb');
+    expect(expandToken(token('`pwd`', '/drive'), environment)).toEqual('/drive');
+  });
+
+  test('should substitute next to a variable reference', () => {
+    expect(expandToken(token('$HOME/$(pwd)', 'x'), environment)).toEqual('/home/cockle/x');
+  });
+
+  test('should split unquoted output and not quoted output', () => {
+    expect(splitToken(token('$(pwd)', 'a b'), environment)).toEqual(['a', 'b']);
+    expect(splitToken(token('"$(pwd)"', 'a b'), environment)).toEqual(['a b']);
+  });
+
+  test('should discard an empty unquoted substitution', () => {
+    expect(splitToken(token('$(true)', ''), environment)).toEqual([]);
+    expect(splitToken(token('"$(true)"', ''), environment)).toEqual(['']);
+  });
+
+  test('should ignore a substitution within single quotes', () => {
+    expect(expandToken(tokenize("'$(pwd)'")[0], environment)).toEqual('$(pwd)');
+  });
+});

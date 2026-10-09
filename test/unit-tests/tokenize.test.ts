@@ -536,6 +536,79 @@ describe('tokenize', () => {
       { offset: 9, value: 'b', quoted: [[0, 1]], singleQuoted: [[0, 1]] }
     ]);
   });
+
+  describe('command substitution', () => {
+    test('should record $(...) as a single token', () => {
+      expect(tokenize('echo $(pwd)')).toEqual([
+        { offset: 0, value: 'echo' },
+        { offset: 5, value: '$(pwd)', substitutions: [[0, 6]] }
+      ]);
+      // Whitespace and delimiters within the substitution do not end the token.
+      expect(tokenize('echo $(ls -l; pwd)')).toEqual([
+        { offset: 0, value: 'echo' },
+        { offset: 5, value: '$(ls -l; pwd)', substitutions: [[0, 13]] }
+      ]);
+    });
+
+    test('should record backticks as a single token', () => {
+      expect(tokenize('echo `pwd`')).toEqual([
+        { offset: 0, value: 'echo' },
+        { offset: 5, value: '`pwd`', substitutions: [[0, 5]] }
+      ]);
+    });
+
+    test('should support nested and adjacent substitutions', () => {
+      expect(tokenize('echo $(echo $(pwd))')).toEqual([
+        { offset: 0, value: 'echo' },
+        { offset: 5, value: '$(echo $(pwd))', substitutions: [[0, 14]] }
+      ]);
+      expect(tokenize('echo $(pwd)x`pwd`')).toEqual([
+        { offset: 0, value: 'echo' },
+        {
+          offset: 5,
+          value: '$(pwd)x`pwd`',
+          substitutions: [
+            [0, 6],
+            [7, 12]
+          ]
+        }
+      ]);
+    });
+
+    test('should treat quoted and escaped substitutions literally', () => {
+      expect(tokenize("echo '$(pwd)'")).toEqual([
+        { offset: 0, value: 'echo' },
+        { offset: 5, value: '$(pwd)', quoted: [[0, 6]], singleQuoted: [[0, 6]] }
+      ]);
+      expect(tokenize('echo \\$(pwd)')).toEqual([
+        { offset: 0, value: 'echo' },
+        { offset: 5, value: '\\$(pwd)' }
+      ]);
+    });
+
+    test('should record a substitution within double quotes', () => {
+      expect(tokenize('echo "$(pwd)"')).toEqual([
+        { offset: 0, value: 'echo' },
+        { offset: 5, value: '$(pwd)', quoted: [[0, 6]], substitutions: [[0, 6]] }
+      ]);
+    });
+
+    test('should leave arithmetic expansion literal', () => {
+      // Arithmetic expansion is not supported, so '$((...))' is not a command substitution.
+      expect(tokenize('echo $((1 + 2))')).toEqual([
+        { offset: 0, value: 'echo' },
+        { offset: 5, value: '$((1' },
+        { offset: 10, value: '+' },
+        { offset: 12, value: '2))' }
+      ]);
+    });
+
+    test('should require the substitution to be terminated', () => {
+      expect(hasOpenQuote('echo $(pwd')).toEqual(true);
+      expect(hasOpenQuote('echo `pwd')).toEqual(true);
+      expect(() => tokenize('echo $(pwd')).toThrow();
+    });
+  });
 });
 
 describe('redirectOperator', () => {

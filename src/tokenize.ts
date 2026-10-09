@@ -19,6 +19,12 @@ export type Token = {
   quoted?: [number, number][];
   // Subset of 'quoted' for single-quoted sections: '$' references within them are not expanded.
   singleQuoted?: [number, number][];
+  // Value offsets [start, end) of command substitutions '$(...)' and '`...`' in unquoted or
+  // double-quoted sections. Set for tokens which contain command substitutions. The replacement
+  // values used at run time are held in substitutionValues, in the same order.
+  substitutions?: [number, number][];
+  // Output of each command substitution, set by the shell before the token is expanded.
+  substitutionValues?: string[];
 };
 
 /** A here document whose delimiter word has been read but whose body has not yet. */
@@ -161,6 +167,7 @@ class Tokenizer {
           this._endQuote = '';
           this._quoted = [];
           this._singleQuoted = [];
+          this._substitutions = [];
           return false;
         }
       }
@@ -173,8 +180,12 @@ class Tokenizer {
     if (this._singleQuoted.length > 0) {
       token.singleQuoted = this._singleQuoted;
     }
+    if (this._substitutions.length > 0) {
+      token.substitutions = this._substitutions;
+    }
     this._quoted = [];
     this._singleQuoted = [];
+    this._substitutions = [];
     this._tokens.push(token);
 
     // A token following a here document operator is its delimiter word.
@@ -233,6 +244,19 @@ class Tokenizer {
     if (char === '\n' && this._endQuote === '') {
       this._newline();
       return;
+    }
+
+    if (this._endQuote !== "'" && !this._backslashEscaped(i)) {
+      // Command substitution, which is a single word whatever it contains. '$((', arithmetic
+      // expansion, is not supported and is left as literal text.
+      if (char === '$' && this._source[i + 1] === '(' && this._source[i + 2] !== '(') {
+        this._consumeCommandSubstitution(i, i + 1, false);
+        return;
+      }
+      if (char === '`') {
+        this._consumeCommandSubstitution(i, i, true);
+        return;
+      }
     }
 
     if (this._offset >= 0) {
@@ -303,6 +327,96 @@ class Tokenizer {
     }
     this._prevChar = char;
     this._prevCharType = charType;
+  }
+
+  /** Whether the character at index is preceded by an odd number of backslashes. */
+  private _backslashEscaped(index: number): boolean {
+    let backslashes: number = 0;
+    for (let j = index - 1; j >= 0 && this._source[j] === '\\'; j--) {
+      backslashes++;
+    }
+    return backslashes % 2 === 1;
+  }
+
+  /**
+   * Consume a command substitution, appending its raw text to the current token and recording its
+   * span. The substitution starts at start and openIndex is the offset of its '(' or '`'.
+   */
+  private _consumeCommandSubstitution(start: number, openIndex: number, backtick: boolean): void {
+    const end: number = this._commandSubstitutionEnd(openIndex, backtick);
+    const raw: string = this._source.slice(start, end < 0 ? this._source.length : end + 1);
+    if (this._offset < 0) {
+      this._offset = start;
+      this._value = '';
+    }
+    const spanStart: number = this._value.length;
+    this._value += raw;
+    this._substitutions.push([spanStart, this._value.length]);
+    if (end < 0) {
+      // Unterminated: stop tokenizing so that more input can complete the substitution.
+      this._index = this._source.length;
+      this._endQuote = backtick ? '`' : ')';
+    } else {
+      this._index = end;
+    }
+    this._prevChar = raw.at(-1) ?? '';
+    this._prevCharType = CharType.Other;
+  }
+
+  /**
+   * Index of the closing ')' or '`' of a command substitution whose opening character is at
+   * openIndex, or -1 if it is not present. Quoted sections and nested substitutions are skipped.
+   */
+  private _commandSubstitutionEnd(openIndex: number, backtick: boolean): number {
+    const source: string = this._source;
+    let depth: number = 1;
+    let j: number = openIndex + 1;
+    while (j < source.length) {
+      const char: string = source[j];
+      if (char === '\\') {
+        j += 2;
+      } else if (backtick) {
+        if (char === '`') {
+          return j;
+        }
+        j++;
+      } else if (char === "'") {
+        const end: number = source.indexOf("'", j + 1);
+        if (end < 0) {
+          return -1;
+        }
+        j = end + 1;
+      } else if (char === '"') {
+        j++;
+        while (j < source.length && source[j] !== '"') {
+          j += source[j] === '\\' ? 2 : 1;
+        }
+        if (j >= source.length) {
+          return -1;
+        }
+        j++;
+      } else if (char === '`') {
+        const end: number = this._commandSubstitutionEnd(j, true);
+        if (end < 0) {
+          return -1;
+        }
+        j = end + 1;
+      } else if (char === '$' && source[j + 1] === '(') {
+        depth++;
+        j += 2;
+      } else if (char === '(') {
+        depth++;
+        j++;
+      } else if (char === ')') {
+        if (--depth === 0) {
+          return j;
+        }
+        j++;
+      } else {
+        j++;
+      }
+    }
+    return -1;
   }
 
   /** Handle a newline that is not within a quoted section. */
@@ -388,6 +502,7 @@ class Tokenizer {
   private _value: string = ''; // Current token.
   private _quoted: [number, number][] = []; // Quoted sections of current token.
   private _singleQuoted: [number, number][] = []; // Single-quoted sections of current token.
+  private _substitutions: [number, number][] = []; // Command substitutions of current token.
   private _quoteStart: number = 0; // Value offset of start of current quoted section.
   private _endQuote: string = ''; // End quote if in quoted section, otherwise emptry string.
   private _pendingHeredocs: IPendingHeredoc[] = [];

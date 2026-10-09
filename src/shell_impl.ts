@@ -31,7 +31,7 @@ import {
   TerminalInput,
   TerminalOutput
 } from './io';
-import { CommandNode, isCommandComplete, parse, PipeNode } from './parse';
+import { CommandNode, isCommandComplete, type Node, parse, PipeNode } from './parse';
 import { SharedFS } from './shared_fs';
 import { TabCompleter } from './tab_completer';
 import type { Termios } from './termios';
@@ -769,7 +769,7 @@ export class ShellImpl implements IShellImpl {
 
     this.history.add(cmdText);
 
-    let exitCode!: number;
+    let exitCode: number | undefined;
     const stdin = new TerminalInput(
       timeoutMs => this._runContext.workerIO.pollInput(timeoutMs),
       maxChars => this._runContext.workerIO.read(maxChars),
@@ -779,24 +779,7 @@ export class ShellImpl implements IShellImpl {
     const stderr = this._stderr;
     try {
       const nodes = parse(cmdText, true, this.aliases);
-
-      for (const node of nodes) {
-        if (node instanceof CommandNode) {
-          exitCode = await this._runCommand(node, stdin, stdout, stderr, false);
-        } else if (node instanceof PipeNode) {
-          const { commands } = node;
-          const n = commands.length;
-          let prevPipe: Pipe;
-          for (let i = 0; i < n; i++) {
-            const input = i === 0 ? stdin : prevPipe!.input;
-            const output = i < n - 1 ? (prevPipe = new Pipe()) : stdout;
-            exitCode = await this._runCommand(commands[i], input, output, stderr, true);
-          }
-        } else {
-          // This should not occur.
-          throw new GeneralError(`Expected CommandNode or PipeNode not ${node}`);
-        }
-      }
+      exitCode = await this._runNodes(nodes, stdin, stdout, stderr);
     } catch (error: any) {
       if (error instanceof ErrorExitCode) {
         exitCode = error.exitCode;
@@ -812,6 +795,78 @@ export class ShellImpl implements IShellImpl {
     }
   }
 
+  /**
+   * Run a sequence of parsed nodes, writing to the given streams.
+   * @returns The exit code of the last command run, or undefined if there are no nodes.
+   */
+  private async _runNodes(
+    nodes: Node[],
+    stdin: IInput,
+    stdout: IOutput,
+    stderr: IOutput
+  ): Promise<number | undefined> {
+    let exitCode: number | undefined;
+    for (const node of nodes) {
+      if (node instanceof CommandNode) {
+        exitCode = await this._runCommand(node, stdin, stdout, stderr, false);
+      } else if (node instanceof PipeNode) {
+        const { commands } = node;
+        const n = commands.length;
+        let prevPipe: Pipe;
+        for (let i = 0; i < n; i++) {
+          const input = i === 0 ? stdin : prevPipe!.input;
+          const output = i < n - 1 ? (prevPipe = new Pipe()) : stdout;
+          exitCode = await this._runCommand(commands[i], input, output, stderr, true);
+        }
+      } else {
+        // This should not occur.
+        throw new GeneralError(`Expected CommandNode or PipeNode not ${node}`);
+      }
+    }
+    return exitCode;
+  }
+
+  /**
+   * Run a command substitution and return its standard output with trailing newlines removed, as
+   * bash does. The command runs in this shell's environment and its standard error goes to the
+   * shell's standard error.
+   * @param command The text of the command to run.
+   * @returns The standard output of the command.
+   */
+  private async _commandSubstitution(command: string): Promise<string> {
+    const output = new Pipe();
+    try {
+      const nodes = parse(command, true, this.aliases);
+      await this._runNodes(nodes, this._dummyInput, output, this._stderr);
+    } catch (error: unknown) {
+      // A command that exits is not an error: as in bash, the substitution just ends there.
+      if (!(error instanceof ErrorExitCode)) {
+        this._stderr.write(`${error}\n`);
+        this._stderr.flush();
+      }
+    }
+    return output.allContent.replace(/\n+$/, '');
+  }
+
+  /**
+   * Run the command substitutions of the given tokens, storing their output on each token so that
+   * it is used when the token is expanded.
+   * @param tokens The tokens whose command substitutions should be run.
+   */
+  private async _resolveSubstitutions(tokens: Token[]): Promise<void> {
+    for (const token of tokens) {
+      if (token.substitutions === undefined) {
+        continue;
+      }
+      const values: string[] = [];
+      for (const [start, end] of token.substitutions) {
+        const open: number = token.value[start] === '`' ? 1 : 2;
+        values.push(await this._commandSubstitution(token.value.slice(start + open, end - 1)));
+      }
+      token.substitutionValues = values;
+    }
+  }
+
   private async _runCommand(
     commandNode: CommandNode,
     input: IInput,
@@ -821,6 +876,11 @@ export class ShellImpl implements IShellImpl {
   ): Promise<number> {
     const head = commandNode.name;
     const tokens = head !== undefined ? [head, ...commandNode.suffix] : [];
+    const redirects = commandNode.redirects ?? [];
+    await this._resolveSubstitutions([
+      ...tokens,
+      ...redirects.flatMap(redirect => [redirect.token, redirect.target])
+    ]);
 
     // Leading 'NAME=value' tokens before the command word are assignments. A command which is only
     // assignments defines them in the shell; otherwise they apply to that command alone.

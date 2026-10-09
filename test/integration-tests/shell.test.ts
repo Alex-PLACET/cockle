@@ -213,6 +213,38 @@ test.describe('Shell', () => {
       expect(output).toMatch('\r\nHello    x;   yz\r\n');
     });
 
+    test('should support command substitution', async ({ page }) => {
+      const output = await shellLineSimpleN(page, [
+        'echo $(pwd)',
+        'echo `pwd`',
+        'echo "start $(pwd) end"',
+        'echo $(echo a; echo b)',
+        'echo "$(echo a; echo b)"',
+        'echo $(echo $(pwd))',
+        'X=$(pwd); echo $X',
+        'echo before$(pwd)after',
+        "echo '$(pwd)'",
+        'echo \\$(pwd)',
+        'echo $((1 + 2))',
+        'echo "$(echo "hi")"'
+      ]);
+      expect(output[0]).toMatch('\r\n/drive\r\n');
+      expect(output[1]).toMatch('\r\n/drive\r\n');
+      expect(output[2]).toMatch('\r\nstart /drive end\r\n');
+      // Unquoted output is split into fields, quoted output is not.
+      expect(output[3]).toMatch('\r\na b\r\n');
+      expect(output[4]).toMatch('\r\na\r\nb\r\n');
+      expect(output[5]).toMatch('\r\n/drive\r\n');
+      expect(output[6]).toMatch('\r\n/drive\r\n');
+      expect(output[7]).toMatch('\r\nbefore/driveafter\r\n');
+      // Single-quoted and escaped substitutions are literal, as is arithmetic expansion.
+      expect(output[8]).toMatch('\r\n$(pwd)\r\n');
+      expect(output[9]).toMatch('\r\n$(pwd)\r\n');
+      expect(output[10]).toMatch('\r\n$((1 + 2))\r\n');
+      // Quotes within the substitution belong to the inner command.
+      expect(output[11]).toMatch('\r\nhi\r\n');
+    });
+
     test('should set IShell.exitCode', async ({ page }) => {
       const exitCodes = await page.evaluate(async cmdName => {
         const { shell } = await globalThis.cockle.shellSetupSimple();
